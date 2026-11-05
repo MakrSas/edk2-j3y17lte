@@ -22,6 +22,9 @@
 
 #include "DwMmcHcDxe.h"
 
+// J3: TRUE when the controller uses the 64-bit IDMAC register map / descriptors (HCON[27]).
+BOOLEAN  gDwMmcDma64 = FALSE;
+
 /**
   Dump the content of SD/MMC host controller's Capability Register.
 
@@ -130,10 +133,10 @@ DwMmcHcEnableInterrupt (
   MmioWrite32 (DevBase + DW_MMC_RINTSTS, IntStatus);
 
   IdIntEn = ~0;
-  MmioWrite32 (DevBase + DW_MMC_IDINTEN, IdIntEn);
+  MmioWrite32 (DevBase + DW_MMC_IDINTEN_REG, IdIntEn);
 
   IdSts = ~0;
-  MmioWrite32 (DevBase + DW_MMC_IDSTS, IdSts);
+  MmioWrite32 (DevBase + DW_MMC_IDSTS_REG, IdSts);
 
   return EFI_SUCCESS;
 }
@@ -701,7 +704,7 @@ BuildDmaDescTable (
   }
 
   Entries   = (DataLen + DWMMC_DMA_BUF_SIZE - 1) / DWMMC_DMA_BUF_SIZE;
-  TableSize = Entries * sizeof (DW_MMC_HC_DMA_DESC_LINE);
+  TableSize = Entries * (gDwMmcDma64 ? sizeof (DW_MMC_HC_DMA_DESC_LINE64) : sizeof (DW_MMC_HC_DMA_DESC_LINE));
   Blocks    = (DataLen + DW_MMC_BLOCK_SIZE - 1) / DW_MMC_BLOCK_SIZE;
 
   Trb->DmaDescPages = (UINT32)EFI_SIZE_TO_PAGES (Entries * DWMMC_DMA_BUF_SIZE);
@@ -770,6 +773,39 @@ BuildDmaDescTable (
 
   MmioWrite32 (DevBase + DW_MMC_BLKSIZ, BlkSize);
   MmioWrite32 (DevBase + DW_MMC_BYTCNT, BytCnt);
+  if (gDwMmcDma64) {
+    DW_MMC_HC_DMA_DESC_LINE64  *D64 = (DW_MMC_HC_DMA_DESC_LINE64 *)Trb->DmaDesc;
+    UINT64                     Buf;
+    UINT64                     Next;
+
+    for (Index = 0; Index < Entries; Index++) {
+      Buf  = (UINT64)Trb->DataPhy + (UINT64)DWMMC_DMA_BUF_SIZE * Index;
+      Next = (UINT64)Trb->DmaDescPhy + sizeof (DW_MMC_HC_DMA_DESC_LINE64) * (Index + 1);
+      D64[Index].Des0 = DW_MMC_IDMAC_DES0_OWN | DW_MMC_IDMAC_DES0_CH | DW_MMC_IDMAC_DES0_DIC;
+      D64[Index].Des1 = 0;
+      D64[Index].Des2 = DW_MMC_IDMAC_DES1_BS1 (DWMMC_DMA_BUF_SIZE);
+      D64[Index].Des3 = 0;
+      D64[Index].Des4 = (UINT32)Buf;
+      D64[Index].Des5 = (UINT32)(Buf >> 32);
+      D64[Index].Des6 = (UINT32)Next;
+      D64[Index].Des7 = (UINT32)(Next >> 32);
+      Remaining = Remaining - DWMMC_DMA_BUF_SIZE;
+    }
+    D64[0].Des0 |= DW_MMC_IDMAC_DES0_FS;
+    D64[Entries - 1].Des0 &= ~(DW_MMC_IDMAC_DES0_CH | DW_MMC_IDMAC_DES0_DIC);
+    D64[Entries - 1].Des0 |= DW_MMC_IDMAC_DES0_OWN | DW_MMC_IDMAC_DES0_LD;
+    D64[Entries - 1].Des2 = DW_MMC_IDMAC_DES1_BS1 (Remaining + DWMMC_DMA_BUF_SIZE);
+    D64[Entries - 1].Des6 = 0;
+    D64[Entries - 1].Des7 = 0;
+
+    MmioWrite32 (DevBase + DW_MMC_DBADDRL, (UINT32)Trb->DmaDescPhy);
+    MmioWrite32 (DevBase + DW_MMC_DBADDRU, (UINT32)((UINT64)Trb->DmaDescPhy >> 32));
+    ArmDataSynchronizationBarrier ();
+    ArmInstructionSynchronizationBarrier ();
+    MmioWrite32 (DevBase + DW_MMC_IDSTS64, ~0U);
+    return Status;
+  }
+
   DmaDesc = Trb->DmaDesc;
   for (Index = 0; Index < Entries; Index++, DmaDesc++) {
     DmaDesc->Des0 = DW_MMC_IDMAC_DES0_OWN | DW_MMC_IDMAC_DES0_CH |
@@ -814,7 +850,7 @@ BuildDmaDescTable (
   // Clear interrupts
   //
   Idsts = ~0;
-  MmioWrite32 (DevBase + DW_MMC_IDSTS, Idsts);
+  MmioWrite32 (DevBase + DW_MMC_IDSTS_REG, Idsts);
 
   return Status;
 }
@@ -995,7 +1031,11 @@ DwMmcCreateTrb (
       Flag = EfiBusMasterRead;
     }
 
-    if (Private->Slot[Trb->Slot].CardType == SdCardType) {
+    //
+    // J3 experiment: read eMMC data through the FIFO (PIO) instead of IDMAC
+    // to tell a DMA/FMP/cache problem apart from a bus/timing problem.
+    //
+    if ((Private->Slot[Trb->Slot].CardType == SdCardType) || J3_EMMC_USE_FIFO) {
       Trb->UseFifo = TRUE;
     } else {
       Trb->UseFifo = FALSE;
@@ -1427,16 +1467,29 @@ DwSdExecTrb (
       }
     } else {
       if (Packet->InTransferLength) {
-        do {
-          Idsts = MmioRead32 (DevBase + DW_MMC_IDSTS);
-        } while ((Idsts & DW_MMC_IDSTS_RI) == 0);
+        {
+          UINTN  J3Spin = 0;
+          do {
+            Idsts = MmioRead32 (DevBase + DW_MMC_IDSTS_REG);
+            if ((Idsts & (BIT2 | BIT5)) != 0) {        // FBE / CES
+              DEBUG ((DEBUG_INFO, "J3 dwmmc: IDMAC read error IDSTS=%08x\n", Idsts));
+              return EFI_DEVICE_ERROR;
+            }
+            if (++J3Spin > 2000000) {
+              DEBUG ((DEBUG_ERROR, "J3 dwmmc: IDMAC read timeout IDSTS=%08x RINTSTS=%08x\n",
+                Idsts, MmioRead32 (DevBase + DW_MMC_RINTSTS)));
+              return EFI_TIMEOUT;
+            }
+            MicroSecondDelay (1);
+          } while ((Idsts & DW_MMC_IDSTS_RI) == 0);
+        }
         Status = DwMmcHcStopDma (Private, Trb);
         if (EFI_ERROR (Status)) {
           return Status;
         }
       } else if (Packet->OutTransferLength) {
         do {
-          Idsts = MmioRead32 (DevBase + DW_MMC_IDSTS);
+          Idsts = MmioRead32 (DevBase + DW_MMC_IDSTS_REG);
         } while ((Idsts & DW_MMC_IDSTS_TI) == 0);
         Status = DwMmcHcStopDma (Private, Trb);
         if (EFI_ERROR (Status)) {
@@ -1579,17 +1632,17 @@ DwMmcCheckTrbResult (
   }
   if (Packet->InTransferLength) {
     do {
-      Idsts = MmioRead32 (DevBase + DW_MMC_IDSTS);
+      Idsts = MmioRead32 (DevBase + DW_MMC_IDSTS_REG);
     } while ((Idsts & BIT1) == 0);
   } else if (Packet->OutTransferLength) {
     do {
-      Idsts = MmioRead32 (DevBase + DW_MMC_IDSTS);
+      Idsts = MmioRead32 (DevBase + DW_MMC_IDSTS_REG);
     } while ((Idsts & BIT0) == 0);
   } else {
     return EFI_SUCCESS;
   }
   Idsts = ~0;
-  MmioWrite32 (DevBase + DW_MMC_IDSTS, Idsts);
+  MmioWrite32 (DevBase + DW_MMC_IDSTS_REG, Idsts);
 
   return EFI_SUCCESS;
 }

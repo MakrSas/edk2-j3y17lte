@@ -660,6 +660,28 @@ DwMmcHcDriverBindingStart (
   //
   // Initialize slot and start identification process for the new attached device
   //
+  DEBUG ((DEBUG_INFO,
+    "J3 dwmmc: VERID=%08x CTRL=%08x CLKDIV=%08x CTYPE=%08x\n",
+    MmioRead32 (Private->DevBase + 0x06c), MmioRead32 (Private->DevBase + 0x000),
+    MmioRead32 (Private->DevBase + 0x008), MmioRead32 (Private->DevBase + 0x018)));
+  gDwMmcDma64 = (BOOLEAN)DW_MMC_HCON_ADDR64 (MmioRead32 (Private->DevBase + DW_MMC_HCON));
+  DEBUG ((DEBUG_INFO,
+    "J3 dwmmc: HCON=%08x -> IDMAC %a, UHSREG=%08x BMOD=%08x CLKSEL64=%08x\n",
+    MmioRead32 (Private->DevBase + DW_MMC_HCON), gDwMmcDma64 ? "64-bit" : "32-bit",
+    MmioRead32 (Private->DevBase + 0x074), MmioRead32 (Private->DevBase + 0x080),
+    MmioRead32 (Private->DevBase + 0x0a8)));
+  //
+  // J3 / Exynos 7: CIU divider + drive/sample phase live in CLKSEL64 (0xA8).
+  // DT samsung,dw-mshc-sdr-timing = <3 0 2 0>  -> div 3, fine-drv 0, drv 2, sample 0.
+  //
+  {
+    UINT32  ClkSel = MmioRead32 (Private->DevBase + 0x0a8);
+    UINT32  NewSel = (ClkSel & ~((7u << 24) | (7u << 16) | (3u << 6) | 7u)) |
+                     (3u << 24) | (2u << 16) | (0u << 6) | 0u;
+    MmioWrite32 (Private->DevBase + 0x0a8, NewSel);
+    DEBUG ((DEBUG_INFO, "J3 dwmmc: CLKSEL64 %08x -> %08x (rb %08x)\n",
+      ClkSel, NewSel, MmioRead32 (Private->DevBase + 0x0a8)));
+  }
   Status = DwMmcHcInitHost (Private->DevBase, Private->Capability[0]);
   if (EFI_ERROR (Status)) {
     goto Done;

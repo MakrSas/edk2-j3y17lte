@@ -62,6 +62,20 @@
 #define DW_MMC_UHSREG_EXT             0x108
 #define DW_MMC_ENABLE_SHIFT           0x110
 #define DW_MMC_FIFO_START             0x200
+#define J3_EMMC_USE_FIFO              0   // J3: PIO experiment off (IDMAC works once 64-bit mode is used)
+
+//
+// J3 / Exynos 7: DW-MSHC synthesized with 64-bit addressing (HCON[27]).
+// IDMAC register map and descriptor layout differ from the 32-bit variant.
+//
+#define DW_MMC_HCON_ADDR64(x)         (((x) >> 27) & 1)
+#define DW_MMC_DBADDRL                0x088
+#define DW_MMC_DBADDRU                0x08c
+#define DW_MMC_IDSTS64                0x090
+#define DW_MMC_IDINTEN64              0x094
+extern BOOLEAN  gDwMmcDma64;
+#define DW_MMC_IDSTS_REG              (gDwMmcDma64 ? DW_MMC_IDSTS64   : DW_MMC_IDSTS)
+#define DW_MMC_IDINTEN_REG            (gDwMmcDma64 ? DW_MMC_IDINTEN64 : DW_MMC_IDINTEN)
 
 #define GET_IDSTS_DMAC_FSM(x)                   (((x) >> 13) & 0xf)
 #define IDSTS_FSM_DMA_IDLE                      0
@@ -214,6 +228,17 @@ typedef struct {
   UINT32   Des2;
   UINT32   Des3;
 } DW_MMC_HC_DMA_DESC_LINE;
+
+typedef struct {
+  UINT32   Des0;   // control (OWN/CH/FS/LD/DIC)
+  UINT32   Des1;   // reserved
+  UINT32   Des2;   // buffer 1/2 sizes
+  UINT32   Des3;   // reserved
+  UINT32   Des4;   // buffer 1 address [31:0]
+  UINT32   Des5;   // buffer 1 address [63:32]
+  UINT32   Des6;   // next descriptor  [31:0]
+  UINT32   Des7;   // next descriptor  [63:32]
+} DW_MMC_HC_DMA_DESC_LINE64;
 
 #define SD_MMC_SDMA_BOUNDARY          512 * 1024
 #define SD_MMC_SDMA_ROUND_UP(x, n)    (((x) + n) & ~(n - 1))

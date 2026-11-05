@@ -35,6 +35,36 @@
 
 #include "PlatformBm.h"
 
+//
+// J3 boot stage markers: fill the whole screen with a color via GOP.
+//   BLUE   = BDS started (BeforeConsole)
+//   YELLOW = console ready, about to ConnectAll (eMMC/USB)
+//   GREEN  = ConnectAll finished
+//   RED    = everything done, booting Shell
+//
+STATIC
+VOID
+J3StageFill (
+  IN UINT8  Red,
+  IN UINT8  Green,
+  IN UINT8  Blue,
+  IN CONST CHAR8 *Stage
+  )
+{
+  EFI_GRAPHICS_OUTPUT_PROTOCOL   *Gop;
+  EFI_GRAPHICS_OUTPUT_BLT_PIXEL  Px;
+
+  DEBUG ((DEBUG_ERROR, "J3 STAGE: %a\n", Stage));
+  if (EFI_ERROR (gBS->LocateProtocol (&gEfiGraphicsOutputProtocolGuid, NULL, (VOID **)&Gop))) {
+    DEBUG ((DEBUG_ERROR, "J3 STAGE: no GOP\n"));
+    return;
+  }
+  Px.Red = Red; Px.Green = Green; Px.Blue = Blue; Px.Reserved = 0;
+  Gop->Blt (Gop, &Px, EfiBltVideoFill, 0, 0, 0, 0,
+            Gop->Mode->Info->HorizontalResolution,
+            Gop->Mode->Info->VerticalResolution, 0);
+}
+
 #define DP_NODE_LEN(Type) { (UINT8)sizeof (Type), (UINT8)(sizeof (Type) >> 8) }
 
 #pragma pack (1)
@@ -492,6 +522,8 @@ PlatformBootManagerBeforeConsole (
   EFI_STATUS                    Status;
   ESRT_MANAGEMENT_PROTOCOL      *EsrtManagement;
 
+  J3StageFill (0x00, 0x00, 0xFF, "BDS start (blue)");
+
   if (GetBootModeHob() == BOOT_ON_FLASH_UPDATE) {
     DEBUG ((DEBUG_INFO, "ProcessCapsules Before EndOfDxe ......\n"));
     Status = ProcessCapsules ();
@@ -532,10 +564,17 @@ PlatformBootManagerBeforeConsole (
 
   EfiBootManagerUpdateConsoleVariable (ConIn,
     (EFI_DEVICE_PATH_PROTOCOL *)&mSerialConsole, NULL);
+  //
+  // J3: no UART - the "serial" port is the framebuffer debug log. Keeping the
+  // serial terminal in ConOut makes ConSplitter find no common text mode with
+  // GraphicsConsole, so QueryMode fails and the Shell exits (Shell.c ConsoleInfo ASSERT).
+  //
+#if 0
   EfiBootManagerUpdateConsoleVariable (ConOut,
     (EFI_DEVICE_PATH_PROTOCOL *)&mSerialConsole, NULL);
   EfiBootManagerUpdateConsoleVariable (ErrOut,
     (EFI_DEVICE_PATH_PROTOCOL *)&mSerialConsole, NULL);
+#endif
 
   //
   // Signal EndOfDxe PI Event
@@ -573,10 +612,14 @@ PlatformBootManagerAfterConsole (
   //
   Status = BootLogoEnableLogo ();
 
+  J3StageFill (0xFF, 0xFF, 0x00, "console ready, ConnectAll... (yellow)");
+
   //
   // Connect the rest of the devices.
   //
   EfiBootManagerConnectAll ();
+
+  J3StageFill (0x00, 0xFF, 0x00, "ConnectAll done (green)");
 
   Status = gBS->LocateProtocol (&gEsrtManagementProtocolGuid, NULL,
                   (VOID **)&EsrtManagement);
@@ -593,6 +636,13 @@ PlatformBootManagerAfterConsole (
   EfiBootManagerRefreshAllBootOption ();
 
   PlatformRegisterOptionsAndKeys ();
+
+  J3StageFill (0xFF, 0x00, 0x00, "all done, booting Shell (red)");
+  gBS->Stall (1500000);
+  if (gST->ConOut != NULL) {
+    gST->ConOut->ClearScreen (gST->ConOut);
+  }
+  Print (L"J3 UEFI OK - Galaxy J3 2017 (SM-J330F)\n");
 }
 
 /**

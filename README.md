@@ -1,192 +1,118 @@
-Attempt to create a minimal EDK2 for Exynos 7570 devices
+# edk2-j3y17lte — UEFI for Samsung Galaxy J3 2017 (SM-J330F)
 
-## Supported devices
+AArch64 UEFI firmware (edk2) for the **Samsung Galaxy J3 2017, SM-J330F**
+(`j3y17lte`, Exynos 7570, board rev 04), booted by the stock Samsung bootloader
+in place of the Linux kernel. The long-term goal is booting Windows on ARM.
 
-Samsung Galaxy J2 Core (j2corelte)
-
-Samsung Galaxy J4 (syncronous exception on GIC)
+Based on [vizPilot/edk2-exynos7570](https://github.com/vizPilot/edk2-exynos7570)
+(itself derived from edk2-exynos7885; the package is still called `EXYNOS7885Pkg`).
 
 ## Status
-Boots to UEFI Shell (Samsung Galaxy J2 Core)
 
-### Building
-Tested on Ubuntu 22.04.
+| Feature | Status |
+|---|---|
+| Boot from stock S-Boot (repacked `boot.img`) | ✅ |
+| Framebuffer / GOP, 720×1280, full-screen text console | ✅ |
+| UEFI Shell | ✅ |
+| Architected timer (26 MHz, CNTFRQ not set by S-Boot) | ✅ |
+| eMMC (DW-MSHC 2.70a, 64-bit IDMAC), 8-bit HS, GPT with all 25 partitions | ✅ |
+| Boot-stage colour markers (blue → yellow → green → red) | ✅ |
+| Hardware buttons as input | ❌ |
+| Second RAM bank (0x80000000–0xBFFFFFFF) | ❌ not mapped yet |
+| ACPI tables for Exynos 7570 (MADT 4 cores, GTDT, DSDT) | ❌ still 7885 tables |
+| SMP / PSCI (SMC, 4× Cortex-A53) | ❌ not wired up |
+| USB, touch, battery, everything else | ❌ |
 
-First, clone EDK2.
+## Hardware notes
 
-```
+| Item | Value |
+|---|---|
+| SoC / CPU | Exynos 7570, 4× Cortex-A53 r0p4, MPIDR 0–3, PSCI via `smc` |
+| Entry EL | **EL1** (AArch64); no EL2 is available |
+| RAM | bank0 `0x40000000–0x7E3FFFFF`, bank1 `0x80000000–0xBFFFFFFF` (2 GB total) |
+| Framebuffer | `0x67000000`, 720×1280 visible (virtual 720×2560), DECON at `0x14830000` |
+| GIC-400 | GICD `0x104E1000`, GICC `0x104E2000` |
+| eMMC | DW-MSHC at `0x13540000`, HCON[27]=1 → 64-bit IDMAC, CLKSEL64 at `0xA8`, sdr-timing `<3 0 2 0>`, 700 MHz source, ciu-div 3 |
+| eMMC chip | Samsung QE63MB, 16 GB (30777344 sectors) |
+| Stock board name | `SRPQC17A001KU` |
+
+## Changes compared to upstream
+
+- `EXYNOS7885Pkg/Devices/j3y17lte.dsc`: device config (RAM, framebuffer, 26 MHz timer PCD).
+- `Include/Configuration/DeviceMemoryMap.h`: contiguous, non-overlapping bank0 map.
+  The old map reached the secure region at `0x7E800000` and caused data aborts.
+- `Drivers/J3DwMmcPlatformDxe` (new): registers the DW-MSHC controller as a
+  non-discoverable device and provides `PLATFORM_DW_MMC_PROTOCOL` (8-bit, HS, 1.8 V, 200 MHz base clock).
+- `Drivers/DwMmcHcDxe`: 64-bit IDMAC descriptors/register layout (`DBADDRL/U`, `IDSTS64`, `IDINTEN64`),
+  bounded waits instead of endless loops, CLKSEL64 timing setup for Exynos 7.
+  Optional read benchmark: build with `-D J3_EMMC_BENCH`.
+- `Drivers/GraphicsConsoleDxe`: mode 0 uses the full panel size (the old 120×50 mode did not fit 1280 px).
+- `Library/PlatformBootManagerLib`: serial console removed from ConOut/ErrOut (ConSplitter had no
+  common mode and the Shell asserted), plus full-screen colour stage markers for debugging without a UART.
+- `EXYNOS7885Pkg.fdf`: DwcSdhciDxe dropped (the 7570 eMMC is DW-MSHC, not SDHCI).
+
+## Building
+
+Tested on Ubuntu 24.04 (x86_64).
+
+```bash
+sudo apt install build-essential uuid-dev iasl git nasm python3 gcc-aarch64-linux-gnu
 cd ..
 git clone https://github.com/tianocore/edk2 --recursive -b edk2-stable202302
 git clone https://github.com/tianocore/edk2-platforms.git
+cd edk2-j3y17lte
+./firstrun.sh
+./build-j3y17lte.sh path/to/stock_boot.img
 ```
 
-You should have all three directories side by side.
+`edk2`, `edk2-platforms` and this repository must sit side by side.
 
-Next, install dependencies:
+The result is `workspace/boot_uefi.img`. It is the stock `boot.img` with only the kernel
+replaced by the UEFI (`tools/repack_boot.py`). Take the stock `boot.img` from your own
+firmware or dump it from the device (BOOT is `mmcblk0p9` on SM-J330F): `dd if=/dev/block/mmcblk0p9 of=/sdcard/boot.img`.
 
-22.04:
+## Flashing
 
-```
-sudo apt install build-essential uuid-dev iasl git nasm python3-distutils gcc-aarch64-linux-gnu
-```
+> **Back up EFS first.** Without it you lose IMEI/baseband. From TWRP:
+> `dd if=$(readlink -f /dev/block/platform/*/by-name/EFS) of=/sdcard/efs.img`, then copy it off the device.
 
-Also see [EDK2 website](https://github.com/tianocore/tianocore.github.io/wiki/Using-EDK-II-with-Native-GCC#Install_required_software_from_apt)
+1. Unlock the bootloader (OEM unlock) and install TWRP to RECOVERY.
+2. Boot TWRP: **Vol Up + Home + Power**.
+3. Flash the image with `dd` and **reboot from TWRP**:
+   ```bash
+   adb push workspace/boot_uefi.img /tmp/b.img
+   adb shell 'dd if=/tmp/b.img of=/dev/block/mmcblk0p9 bs=1M && sync'
+   adb reboot
+   ```
 
-## Tutorials
+Rebooting straight from Download Mode (Odin/Heimdall) leaves the display uninitialised,
+so you only get a black screen. To go back to Android, flash the stock `boot.img` the same way.
 
-First run ./firstrun.sh
+On macOS, `adb` may need `ADB_LIBUSB=1`.
 
-Then, ./build.sh.
+## Boot stage colours
 
-This should make a boot.tar image to be flashed in ODIN, you may need to adjust.
+There is no UART, so progress is shown with full-screen colours:
 
-## Porting this project to other Exynos SOCs
+| Colour | Stage |
+|---|---|
+| Blue | BDS started |
+| Yellow | Console ready, connecting all controllers |
+| Green | ConnectAll done |
+| Red | Boot manager done, the Shell follows |
 
-> [!NOTE]
-> This may get you to somewhat boot EDK2, however it may not reach shell at all and may crash/get stuck somewhere.
+## AArch32 research (Windows 10 Mobile)
 
-### What you will need
+Windows 10 Mobile needs AArch32 firmware and kernel. This was tested on the SM-J330F and is
+**not possible** without control of EL3:
 
-- A phone with an Exynos SOC
-- ADB Access
-- Access to TWRP
-- Android Image Kitchen
-- Device Tree Compiler
-- Your phone's screen resolution 
+- The kernel/UEFI is entered at EL1 AArch64, and there is no EL2 to drop from.
+- PSCI `CPU_ON` via SMC32 (`0x84000003`) still starts the secondary core in AArch64.
+- S-Boot starts a payload with a zImage header (no `ARMd` magic) in AArch64 as well.
+  The probe is `tools/mk_a32probe.py`: a polyglot that turns the screen green in A32 and red in A64.
 
-### Grabbing files off your phone
+## Credits
 
-First, we will grab your boot image as in some cases the boot.img generated by the build system won't boot.
-
-To do this, in TWRP do the following command
-
-```adb shell "dd if=/dev/block/by-name/boot of=/tmp/boot.img```
-
-Now grab the file onto your PC
-
-```adb pull /tmp/boot.img```
-
-We also need the information about your phone's memory allocations so we can find where to write stuff, like enabling framebuffer.
-
-To get it, in TWRP do the following command:
-```adb pull /proc/iomem```
-
-Finally we need your phones DTB (Device Tree Blob)
-
-To get it, do the following command in TWRP:
-```adb pull /sys/firmware/fdt```
-
-###  Taking notes of what is needed
-
-First we will need the memory base, to find it open up the iomem you dumped and look for the "System RAM" segment, specifically the first one that comes up, We will assume ```80000000-baafffff : System RAM``` as an example. You want to take note of the first part, which in this case is 80000000.
-
-Next we need the decon area, this is needed for framebuffer, in the iomem dump look for the "decon_f" segment, We will assume ```19050000-1905ffff : decon_f@0x19050000``` to be decon as an example, just as before take note of the first part, which in this case is 19050000
-
-Now we're gonna decompile your DTB into a DTS (Device Tree Source), to do this do the following command ```dtc -I dtb -O dts -o devicetree.dts fdt```
-
-Now open devicetree.dts in a Text Editor, we're gonna look for the interrupt-controller node, again we will assume the interrupt-controller here to be
-
-```
-  interrupt-controller@10100000 {
-    compatible = "arm,cortex-a15-gic\0arm,cortex-a9-gic";
-    #interrupt-cells = <0x03>;
-    #address-cells = <0x00>;
-    interrupt-controller;
-    reg = <0x00 0x10101000 0x1000 0x00 0x10102000 0x1000 0x00 0x10104000 0x2000 0x00 0x10106000 0x2000>;
-    interrupts = <0x01 0x09 0xf04>;
-    phandle = <0x01>;
-  };
-```
-
-You want to take notes of 2 numbers, the first one being after the "interrupt-controller@", which in this case is 10100000, and the second one being after "reg = <reg 0x00 firstnum 0x1000 0x00" which in this case is 10102000.
-
-The final thing to look for is your bootloader framebuffer address, to find this do the following command while your device is in TWRP ```cat /proc/cmdline``` and look for "s3cfb.bootloaderfb=" or anything along the lines of that, as an example we will assume ```s3cfb.bootloaderfb=0xf1000000```, take note of the address after the "=", which in this case is 0xf1000000.
-
-Now you can proceed.
-
-### Making the DSC File
-
-> [!NOTE]
-> You shouldn't make the device use all the ram yet as it may not boot, stick eith 1.5GB or smaller to be safe.
-
-Go into EXYNOS7885Pkg/Devices and copy a10.dsc to (devicename).dsc, for example we'll copy a10.dsc into s20.dsc
-
-Now theres only a couple things to edit here thankfully.
-
-First thing to edit is ```gArmTokenSpaceGuid.PcdSystemMemoryBase```, replace "0x80000000" or whatever address it holds with 0x(Number of the memory base you noted down earlier)
-
-Final things to edit is the framebuffer area, to avoid boring you with more text ill just put the things needing to be edited.
-
-  ```gEXYNOS7885PkgTokenSpaceGuid.PcdMipiFrameBufferAddress|(Framebuffer offset from earlier)```
-  
-  ```gEXYNOS7885PkgTokenSpaceGuid.PcdMipiFrameBufferWidth|(Screen resolution width)```
-  
-  ```gEXYNOS7885PkgTokenSpaceGuid.PcdMipiFrameBufferHeight|(Screen resolution height)```
-
-  ```gEXYNOS7885PkgTokenSpaceGuid.PcdMipiFrameBufferVisibleWidth|(Screen resolution width)```
-  
-  ```gEXYNOS7885PkgTokenSpaceGuid.PcdMipiFrameBufferVisibleHeight|(Screen resolution height)```
-
-After you've edited that you can save the file and close it.
-
-### Correcting the interrupt controller addresses
-
-Open up EXYNOS7885Pkg/EXYNOS7885.dsc and replace ```gArmTokenSpaceGuid.PcdGicDistributorBase|0x12301000``` with ```gArmTokenSpaceGuid.PcdGicDistributorBase|0x(First interrupt address you noted)``` after which  replace ```gArmTokenSpaceGuid.PcdGicInterruptInterfaceBase|0x12302000``` with ```gArmTokenSpaceGuid.PcdGicInterruptInterfaceBase|0x(Second interrupt address you noted)```
-
-You can now save and close the file.
-
-### Correcting decon address
-
-Go to https://godbolt.org/ and before doing anything chabge the compiler on the right to ARM64 GCC 5.4.
-
-Then in the left paste
-
-```
-void enableDecon()
-{
-	*(int*) (0x(decon_f noted from before) + 0x70) = 0x1281;
-}
-```
-
-The assembly you'll want is in the middle.
-
-
-Go to EXYNOS7885Pkg/Library
-/EXYNOS7885PkgLib and open up "EXYNOS7885PkgHelper.S"
-
-Replace the ```enableDecon:``` function with the one you got from the online compiler (except for the last ret) then close and save the file.
-
-### Editing the build script
-
-Open build.sh
-
-Replace any mention of a10.dsc with (Device name).dsc
-
-Now you can build with the steps above.
-
-### Running EDK2 in your device
-
-After your device builds don't use the boot.img in workspace as the bootloader may not like it, instead take the boot.img you dumped earlier and place it into Android Image Kitchen, unpack it with ```./unpackimg.sh boot.img``` then take the "UEFI" file from the workspace folder and put it into split_image under the name "boot.img-kernel", obviously replacing the old one, repack the image with ```./repackimg.sh```.
-
-Rename image-new.img to boot.img, then using 7zip (on windows) or tar on linux, archive it to a ``.tar``.
-
-You can now flash boot.tar onto your phone using ODIN3, Heimdall, or TWRP if you prefer.
-
-### Getting EDK2 shell fullscreen
-
-If you made it this far, congratulations but you're here to get the shell fullscreen not to get some kind of trophy. To make the shell fullscreen open, up ```EXYNOS7885Pkg/Drivers/GraphicsConsoleDxe/GraphicsConsole.c```, go to line 293,
-
-```NewModeBuffer[ValidCount].Columns``` should equal your devices resolution width divided by 8 and ```NewModeBuffer[ValidCount].Rows``` should equal your devices resolution height divided by 19, obviously if any of the divisions have remainders (e.g 23.4) go down to the lowest whole number to be safe (e.g 23)
-
-
-# Credits
-
-SimpleFbDxe screen driver is from imbushuo's [Lumia950XLPkg](https://github.com/WOA-Project/Lumia950XLPkg).
-
-Zhuowei for making edk2-pixel3
-
-sonic011gamer for making edk2-exynos7885
-
-shivamurthyshastri for creating linaro-edk2-samsung_arndale (SamsungPlatformPkg)
-
-All the people in ``EDKII pain and misery, struggles and disappointment`` on Discord.
+- [TianoCore edk2](https://github.com/tianocore/edk2)
+- [vizPilot/edk2-exynos7570](https://github.com/vizPilot/edk2-exynos7570) and the edk2-exynos7885 project it is based on
+- DwMmcHcDxe is derived from the edk2-platforms DesignWare MMC driver

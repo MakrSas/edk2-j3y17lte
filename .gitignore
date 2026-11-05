@@ -2,3 +2,5 @@ uefi.img
 BootShim/BootShim.bin
 12
 
+*.orig
+workspace/boot_uefi.img

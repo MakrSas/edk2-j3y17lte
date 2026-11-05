@@ -1,0 +1,38 @@
+## @file
+#  Galaxy J3 2017 (SM-J330F, Exynos 7570): registers the eMMC DW-MSHC at
+#  0x13540000 as a NonDiscoverableDevice and provides PLATFORM_DW_MMC_PROTOCOL
+#  so EXYNOS7885Pkg/Drivers/DwMmcHcDxe can bind to it.
+##
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = J3DwMmcPlatformDxe
+  FILE_GUID                      = 6e0a8f4c-3b1d-4c55-9a2e-7f1c5d3b9e21
+  MODULE_TYPE                    = DXE_DRIVER
+  VERSION_STRING                 = 1.0
+  ENTRY_POINT                    = J3DwMmcPlatformDxeInitialize
+
+[Sources]
+  J3DwMmcPlatformDxe.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+  EXYNOS7885Pkg/EXYNOS7885Pkg.dec
+
+[LibraryClasses]
+  BaseMemoryLib
+  DebugLib
+  MemoryAllocationLib
+  UefiBootServicesTableLib
+  UefiDriverEntryPoint
+
+[Protocols]
+  gEdkiiNonDiscoverableDeviceProtocolGuid       ## PRODUCES
+  gEfiDevicePathProtocolGuid                    ## PRODUCES
+  gPlatformDwMmcProtocolGuid                    ## PRODUCES
+
+[Guids]
+  gDwMmcHcNonDiscoverableDeviceGuid
+
+[Depex]
+  TRUE

@@ -247,6 +247,7 @@
 
 
   EXYNOS7885Pkg/Drivers/DwMmcHcDxe/DwMmcHcDxe.inf
+  EXYNOS7885Pkg/Drivers/J3DwMmcPlatformDxe/J3DwMmcPlatformDxe.inf
 
   #
   # FAT filesystem + GPT/MBR partitioning

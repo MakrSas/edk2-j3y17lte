@@ -171,7 +171,9 @@ READ_LOCK_STATUS   = TRUE
 
   INF MdeModulePkg/Bus/Sd/EmmcDxe/EmmcDxe.inf
   INF MdeModulePkg/Bus/Pci/SdMmcPciHcDxe/SdMmcPciHcDxe.inf
-  INF EXYNOS7885Pkg/Drivers/DwcSdhciDxe/DwcSdhciDxe.inf
+  # J3: Exynos 7570 eMMC is DW-MSHC, not SDHCI
+  #INF EXYNOS7885Pkg/Drivers/DwcSdhciDxe/DwcSdhciDxe.inf
+  INF EXYNOS7885Pkg/Drivers/J3DwMmcPlatformDxe/J3DwMmcPlatformDxe.inf
   INF EXYNOS7885Pkg/Drivers/DwMmcHcDxe/DwMmcHcDxe.inf
 
   #

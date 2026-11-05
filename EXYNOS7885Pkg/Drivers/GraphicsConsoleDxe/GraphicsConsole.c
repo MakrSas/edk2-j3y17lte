@@ -290,8 +290,8 @@ InitializeGraphicsConsoleTextMode (
   //
   ValidCount = 0;
 
-  NewModeBuffer[ValidCount].Columns       = 50;
-  NewModeBuffer[ValidCount].Rows          = 120;
+  NewModeBuffer[ValidCount].Columns       = MaxColumns;  // J3: was 50 (hardcoded for another panel)
+  NewModeBuffer[ValidCount].Rows          = MaxRows;     // J3: was 120 -> 2280px > 1280px panel
   NewModeBuffer[ValidCount].GopWidth      = HorizontalResolution;
   NewModeBuffer[ValidCount].GopHeight     = VerticalResolution;
   NewModeBuffer[ValidCount].GopModeNumber = GopModeNumber;

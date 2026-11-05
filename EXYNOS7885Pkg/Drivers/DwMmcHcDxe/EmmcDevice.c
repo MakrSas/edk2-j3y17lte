@@ -13,6 +13,10 @@
 #include <Library/DebugLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 
+#include <Library/TimerLib.h>
+#include <Library/MemoryAllocationLib.h>
+#include <Library/BaseMemoryLib.h>
+#include <Library/BaseLib.h>
 #include "DwMmcHcDxe.h"
 
 #define EMMC_GET_STATE(x)                   (((x) >> 9) & 0xf)
@@ -808,32 +812,47 @@ EmmcSetBusMode (
   Private = DW_MMC_HC_PRIVATE_FROM_THIS (PassThru);
   ASSERT (Private->Capability[0].BaseClkFreq != 0);
 
+  DEBUG ((DEBUG_INFO, "J3 emmc: %a\n", "SetBusMode: CMD9 GetCsd"));
   Status = EmmcGetCsd (PassThru, Rca, &Csd);
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "EmmcSetBusMode: GetCsd fails with %r\n", Status));
     return Status;
   }
 
+  DEBUG ((DEBUG_INFO, "J3 emmc: %a\n", "SetBusMode: CMD7 Select"));
   Status = EmmcSelect (PassThru, Rca);
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "EmmcSetBusMode: Select fails with %r\n", Status));
     return Status;
   }
 
-  do {
-    Status = EmmcSendStatus (PassThru, Rca, &DevStatus);
-    if (EFI_ERROR (Status)) {
-      DEBUG ((
-        DEBUG_ERROR,
-        "EmmcSetBusMode: Get Status fails with %r\n",
-        Status
-        ));
-      return Status;
-    }
-  } while (EMMC_GET_STATE (DevStatus) != EMMC_STATE_TRAN);
+  {
+    UINTN  J3Try = 0;
+    do {
+      Status = EmmcSendStatus (PassThru, Rca, &DevStatus);
+      if (EFI_ERROR (Status)) {
+        DEBUG ((
+          DEBUG_ERROR,
+          "EmmcSetBusMode: Get Status fails with %r\n",
+          Status
+          ));
+        return Status;
+      }
+      if (J3Try < 4) {
+        DEBUG ((DEBUG_INFO, "J3 emmc: CMD13 status=0x%08x state=%u\n", DevStatus, EMMC_GET_STATE (DevStatus)));
+      }
+      if (++J3Try > 2000) {
+        DEBUG ((DEBUG_INFO, "J3 emmc: never reached TRAN, last status=0x%08x\n", DevStatus));
+        return EFI_TIMEOUT;
+      }
+      MicroSecondDelay (1000);
+    } while (EMMC_GET_STATE (DevStatus) != EMMC_STATE_TRAN);
+  }
 
+  DEBUG ((DEBUG_INFO, "J3 emmc: %a\n", "SetBusMode: CMD6 bus width 1"));
   BusWidth = 1;
   Status = EmmcSwitchBusWidth (DevBase, PassThru, Rca, FALSE, BusWidth);
+  DEBUG ((DEBUG_INFO, "J3 emmc: %a\n", "SetBusMode: bus width 1 OK"));
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -842,6 +861,7 @@ EmmcSetBusMode (
   //
   // Get Deivce_Type from EXT_CSD register.
   //
+  DEBUG ((DEBUG_INFO, "J3 emmc: %a\n", "SetBusMode: CMD8 GetExtCsd (first DMA read)"));
   Status = EmmcGetExtCsd (PassThru, &ExtCsd);
   if (EFI_ERROR (Status)) {
     DEBUG ((DEBUG_ERROR, "EmmcSetBusMode: GetExtCsd fails with %r\n", Status));
@@ -876,6 +896,13 @@ EmmcSetBusMode (
     ClockFreq = 26;
   }
 
+  {
+    UINT8 *J3B = (UINT8 *)&ExtCsd;
+    DEBUG ((DEBUG_INFO, "J3 emmc: ExtCsd[192]rev=%02x [196]type=%02x [212..215]sec=%02x %02x %02x %02x\n",
+      J3B[192], J3B[196], J3B[212], J3B[213], J3B[214], J3B[215]));
+    DEBUG ((DEBUG_INFO, "J3 emmc: ExtCsd[0..7]=%02x %02x %02x %02x %02x %02x %02x %02x [504]=%02x\n",
+      J3B[0], J3B[1], J3B[2], J3B[3], J3B[4], J3B[5], J3B[6], J3B[7], J3B[504]));
+  }
   if ((ClockFreq == 0) || (HsTiming == 0)) {
     //
     // Continue using default setting.
@@ -932,6 +959,58 @@ EmmcSetBusMode (
   @retval Others            There is not a EMMC card.
 
 **/
+#ifdef J3_EMMC_BENCH
+//
+// J3: read 128 KiB from LBA 0 with CMD18, report throughput and check MBR/GPT.
+//
+STATIC
+VOID
+J3EmmcBench (
+  IN EFI_SD_MMC_PASS_THRU_PROTOCOL  *PassThru
+  )
+{
+  EFI_SD_MMC_COMMAND_BLOCK             CmdBlk;
+  EFI_SD_MMC_STATUS_BLOCK              StatusBlk;
+  EFI_SD_MMC_PASS_THRU_COMMAND_PACKET  Packet;
+  EFI_STATUS                           Status;
+  UINT8                                *Buf;
+  UINT64                               T0;
+  UINT64                               T1;
+  UINT64                               Us;
+  UINTN                                Len;
+
+  Len = 128 * 1024;
+  Buf = AllocatePages (EFI_SIZE_TO_PAGES (Len));
+  if (Buf == NULL) {
+    return;
+  }
+  SetMem (Buf, Len, 0xA5);
+  ZeroMem (&CmdBlk, sizeof (CmdBlk));
+  ZeroMem (&StatusBlk, sizeof (StatusBlk));
+  ZeroMem (&Packet, sizeof (Packet));
+  Packet.SdMmcCmdBlk      = &CmdBlk;
+  Packet.SdMmcStatusBlk   = &StatusBlk;
+  Packet.Timeout          = DW_MMC_HC_GENERIC_TIMEOUT;
+  CmdBlk.CommandIndex     = 18;                 // READ_MULTIPLE_BLOCK
+  CmdBlk.CommandType      = SdMmcCommandTypeAdtc;
+  CmdBlk.ResponseType     = SdMmcResponseTypeR1;
+  CmdBlk.CommandArgument  = 0;                  // LBA 0 (sector addressing)
+  Packet.InDataBuffer     = Buf;
+  Packet.InTransferLength = (UINT32)Len;
+
+  T0     = GetPerformanceCounter ();
+  Status = PassThru->PassThru (PassThru, 0, &Packet, NULL);
+  T1     = GetPerformanceCounter ();
+  Us     = DivU64x32 (GetTimeInNanoSecond (T1 - T0), 1000);
+
+  DEBUG ((DEBUG_INFO, "J3 emmc: bench CMD18 128KiB -> %r in %lu us = %lu KiB/s\n",
+    Status, Us, (Us != 0) ? DivU64x64Remainder (128ull * 1000000ull, Us, NULL) : 0));
+  DEBUG ((DEBUG_INFO, "J3 emmc: LBA0[510..511]=%02x %02x (55 aa?) LBA1 sig=%a\n",
+    Buf[510], Buf[511], (CompareMem (Buf + 512, "EFI PART", 8) == 0) ? "EFI PART OK" : "BAD"));
+  FreePages (Buf, EFI_SIZE_TO_PAGES (Len));
+}
+#endif
+
 EFI_STATUS
 EmmcIdentification (
   IN DW_MMC_HC_PRIVATE_DATA             *Private
@@ -1012,6 +1091,7 @@ EmmcIdentification (
   Private->Slot[0].CardType = EmmcCardType;
 
   Status = EmmcSetBusMode (DevBase, PassThru, Rca);
+  DEBUG ((DEBUG_INFO, "J3 emmc: SetBusMode -> %r\n", Status));
   if (EFI_ERROR (Status)) {
     return Status;
   }
@@ -1031,5 +1111,8 @@ EmmcIdentification (
     }
   } while ((DevStatus & 0xf) == EMMC_STATE_DATA);
 
+#ifdef J3_EMMC_BENCH
+  J3EmmcBench (PassThru);
+#endif
   return Status;
 }
